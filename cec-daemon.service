@@ -1,0 +1,11 @@
+[Unit]
+Description=Consolidated CEC daemon for Framework HDMI Expansion Card (identity, bus guard, boot wake, shutdown/suspend cleanup - replaces cec-guard/cec-power/cec-suspend/cec-reassert)
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/cec-daemon.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
