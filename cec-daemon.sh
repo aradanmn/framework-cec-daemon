@@ -370,6 +370,29 @@ while true; do
             do_suspend
           fi
           ;;
+
+        *)
+          # Every opcode not specifically acted on above still gets
+          # logged, by name, so cec-daemon's own journal is a complete
+          # record of bus activity - not just the opcodes we chose to
+          # react to. This is what should have made the 2026-08-05
+          # "how did the AVR switch inputs" investigation a one-command
+          # answer instead of a manual cross-reference against the
+          # separate raw-monitor service's log.
+          #
+          # Opcode name is extracted from the line itself rather than
+          # matched against a hand-maintained list, so this stays
+          # complete even for opcodes not otherwise anticipated. Only
+          # real opcode header lines ("Transmitted by ..."/"Received
+          # from ..." followed by "OPCODE_NAME (0xNN)") match the "): "
+          # shape below - parameter/continuation lines (e.g.
+          # "        phys-addr: ...") don't, and are silently skipped;
+          # they belong to whichever header line was already logged.
+          opcode=$(echo "$line" | sed -n 's/.*): \([A-Za-z0-9_]*\) (0x[0-9a-fA-F]*).*/\1/p')
+          if [ -n "$opcode" ]; then
+            log "unhandled opcode $opcode: $line"
+          fi
+          ;;
       esac
       ;;
   esac
