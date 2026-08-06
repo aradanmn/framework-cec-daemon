@@ -60,6 +60,26 @@ mkdir -p "$STATE_DIR"
 
 log() { logger -t cec-daemon "$1"; }
 
+# Run a command, capturing its output instead of discarding it. Blanket
+# `>/dev/null 2>&1` on action commands was the standing pattern here until
+# it got called out as a bad default: it's the same "assume success, don't
+# check" shape that let the 2026-08-05 wake-sequence race hide (failed
+# cec-ctl calls left zero trace of *why*, only inferrable after the fact
+# from what was missing on the bus) and later blocked diagnosing whether
+# `bluetoothctl disconnect` was even running during a real suspend. Always
+# log on failure; log on success too only if the command actually said
+# something, so the routine WAKING retry loop doesn't spam the journal.
+run() {
+  local output status
+  output=$("$@" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    log "FAILED (exit $status): $* -- ${output:-<no output>}"
+  elif [ -n "$output" ]; then
+    log "$*: $output"
+  fi
+}
+
 # --- Sleep inhibitor (unchanged mechanism from the previous version -
 # still file-based since it's set from the main loop and released from
 # event handling, both within this same process but worth keeping
@@ -73,6 +93,10 @@ hold_inhibitor() {
 
 release_inhibitor() {
   if [ -f "$INHIBIT_PID_FILE" ]; then
+    # Deliberate, narrow suppression, not the old blanket default: the
+    # only realistic failure here is ESRCH because the inhibitor job
+    # already exited on its own - an expected, harmless race, not
+    # something worth a log line every time it happens.
     kill "$(cat "$INHIBIT_PID_FILE")" 2>/dev/null
     rm -f "$INHIBIT_PID_FILE"
   fi
@@ -82,21 +106,21 @@ release_inhibitor() {
 MY_PHYS=""
 
 send_wake() {
-  cec-ctl -d "$DEV" --to 0 --image-view-on --no-reply >/dev/null 2>&1
-  cec-ctl -d "$DEV" --active-source "phys-addr=$MY_PHYS" --no-reply >/dev/null 2>&1
+  run cec-ctl -d "$DEV" --to 0 --image-view-on --no-reply
+  run cec-ctl -d "$DEV" --active-source "phys-addr=$MY_PHYS" --no-reply
   # Image View On + Active Source only reliably wakes the TV - some AVRs
   # don't auto-follow the TV's power state (confirmed 2026-08-05: the
   # Marantz stayed in standby while the TV/projector woke fine). This is
   # the standard CEC message for "please power on and route audio for
   # me", sent directly to the Audio System rather than relying on a
   # cascade that isn't guaranteed to happen.
-  cec-ctl -d "$DEV" --to 5 --system-audio-mode-request "phys-addr=$MY_PHYS" --no-reply >/dev/null 2>&1
+  run cec-ctl -d "$DEV" --to 5 --system-audio-mode-request "phys-addr=$MY_PHYS" --no-reply
 }
 
 send_standby_broadcast() {
   # --to 15 (broadcast) is required: cec-ctl refuses to send --standby at
   # all without an explicit destination.
-  cec-ctl -d "$DEV" --to 15 --standby --no-reply >/dev/null 2>&1
+  run cec-ctl -d "$DEV" --to 15 --standby --no-reply
 }
 
 do_suspend() {
@@ -106,7 +130,7 @@ do_suspend() {
 pre_sleep_cleanup() {
   # Shared by real suspend (PrepareForSleep) and shutdown (SIGTERM) - "we
   # are about to leave the bus" either way.
-  bluetoothctl disconnect "$CONTROLLER_MAC" >/dev/null 2>&1
+  run bluetoothctl disconnect "$CONTROLLER_MAC"
   if [ "$STATE" = "ACTIVE" ] || [ "$STATE" = "SETTLING" ]; then
     log "we were active source - broadcasting standby"
     send_standby_broadcast
@@ -170,9 +194,13 @@ trap on_term TERM
   done
 ) &
 
-# DBus sleep/resume signal reader.
+# DBus sleep/resume signal reader. stderr is routed through log(), not
+# discarded - a silent connection failure here would mean the daemon just
+# never sees another sleep/resume event again, with no trail explaining
+# why.
 (
-  busctl monitor --match="type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" 2>/dev/null |
+  busctl monitor --match="type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" \
+    2> >(while IFS= read -r errline; do log "busctl monitor: $errline"; done) |
     while IFS= read -r line; do
       printf 'DBUS:%s\n' "$line" > "$EVENT_FIFO"
     done
