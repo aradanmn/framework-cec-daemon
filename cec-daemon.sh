@@ -120,7 +120,26 @@ on_term() {
   # does - is-system-running distinguishes an actual system-wide
   # shutdown/sleep transition ("stopping") from a routine unit restart.
   if [ "$(systemctl is-system-running 2>/dev/null)" = "stopping" ]; then
-    pre_sleep_cleanup
+    # "stopping" alone doesn't distinguish a reboot from a real
+    # poweroff/halt - both activate a system-wide shutdown-like
+    # transition. A reboot means Framework is coming right back; the
+    # rest of the home theater shouldn't be told to stand down just
+    # because Framework itself needs to restart. Only a genuine
+    # poweroff/halt means the session is actually ending.
+    # `systemctl is-active reboot.target` is NOT reliable here - it only
+    # reports success for the literal "active" state, but reboot.target
+    # is still "activating" (not yet "active") at the exact moment this
+    # daemon gets stopped, since stopping it is itself part of the
+    # process of reaching that target. Confirmed live 2026-08-05: this
+    # exact check silently failed and fell through to the full cleanup
+    # path during a real reboot test. Checking the job queue instead -
+    # the reboot job is present there for the whole shutdown transaction,
+    # not just once the target is fully settled.
+    if systemctl list-jobs --no-legend 2>/dev/null | grep -q 'reboot\.target'; then
+      log "System is rebooting, not powering off - leaving the rest of the home theater alone, Framework will reclaim active source on the next boot"
+    else
+      pre_sleep_cleanup
+    fi
   else
     log "SIGTERM received but system is not shutting down (routine restart) - skipping standby broadcast"
   fi
